@@ -1,0 +1,53 @@
+{
+  "description": "验证样例：每条给出查询、期望命中的源文件与章节关键词；前五条在 top3 内即视为通过。",
+  "queries": [
+    {
+      "q": "B+ 树为什么适合做索引",
+      "course": "",
+      "expect": {"title": "索引与查询优化.md", "chapter": "4.2"},
+      "top_k": 3
+    },
+    {
+      "q": "最左前缀原则在联合索引上怎么体现",
+      "course": "数据库系统",
+      "expect": {"title": "索引与查询优化.md", "chapter": "4.3"},
+      "top_k": 3
+    },
+    {
+      "q": "回表和覆盖索引",
+      "course": "",
+      "expect": {"title": "索引与查询优化.md", "chapter": "4.4"},
+      "top_k": 3
+    },
+    {
+      "q": "间隙锁为什么能解决幻读",
+      "course": "",
+      "expect": {"title": "事务与隔离级别.md", "chapter": "5.4"},
+      "top_k": 3
+    },
+    {
+      "q": "redo 和 undo 的区别",
+      "course": "",
+      "expect": {"title": "事务与隔离级别.md", "chapter": "5.5"},
+      "top_k": 3
+    },
+    {
+      "q": "LRU 和 Clock 有什么区别",
+      "course": "操作系统",
+      "expect": {"title": "虚拟内存与页面置换.md", "chapter": "3.4"},
+      "top_k": 3
+    },
+    {
+      "q": "缺页中断发生之后操作系统做了什么",
+      "course": "",
+      "expect": {"title": "虚拟内存与页面置换.md", "chapter": "3.2"},
+      "top_k": 3
+    },
+    {
+      "q": "抖动 thrashing 是怎么产生的",
+      "course": "",
+      "expect": {"title": "虚拟内存与页面置换.md", "chapter": "3.2"},
+      "top_k": 5
+    }
+  ]
+}
