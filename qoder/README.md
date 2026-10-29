@@ -118,6 +118,8 @@ python -m eval.run_eval
 
 ## 公开站点
 
+站点地址：<https://course-notes-search-4stmu9183vl.qoder.zone/>
+
 `site/` 是发布到 Qoder Sites 的静态展示页，内容包括项目说明、检索演示、seekdb 用法和验证结果表。页面上的检索框有两档：选中验证样例时展示本地 seekdb 返回的真实混合检索结果；自由输入时退化为浏览器内的全文字面匹配（向量通道需要连本地 seekdb 才能参与）。
 
 演示数据由 `python -m eval.export_site_demo` 从当前数据库导出到 `site/demo-data.js`，重新导入语料后重跑一次即可刷新。
