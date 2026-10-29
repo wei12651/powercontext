@@ -47,7 +47,7 @@
       "q": "抖动 thrashing 是怎么产生的",
       "course": "",
       "expect": {"title": "虚拟内存与页面置换.md", "chapter": "3.2"},
-      "top_k": 5
+      "top_k": 3
     }
   ]
 }

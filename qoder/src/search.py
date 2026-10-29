@@ -83,16 +83,20 @@ def search(query: str, course: str = "", limit: int = 8):
 def _highlight(text: str, query: str, width: int = 260) -> str:
     plain = text.replace("\n", " ").strip()
     hit = plain.find(query)
-    if hit >= 0:
-        start = max(0, hit - 60)
-        return plain[start:start + width]
-    tokens = [tok for tok in _tokenize(query) if len(tok) >= 2]
-    for token in sorted(tokens, key=len, reverse=True):
-        hit = plain.find(token)
-        if hit >= 0:
-            start = max(0, hit - 60)
-            return plain[start:start + width]
-    return plain[:width]
+    if hit < 0:
+        tokens = [tok for tok in _tokenize(query) if len(tok) >= 2]
+        hits = [plain.find(token) for token in sorted(tokens, key=len, reverse=True)]
+        hit = next((pos for pos in hits if pos >= 0), -1)
+    if hit < 0:
+        return plain[:width] + ("…" if len(plain) > width else "")
+
+    start = max(0, hit - 60)
+    piece = plain[start:start + width]
+    if start > 0:
+        piece = "…" + piece
+    if start + width < len(plain):
+        piece += "…"
+    return piece
 
 
 def main():

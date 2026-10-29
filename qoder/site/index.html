@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程笔记检索助手 · seekdb 混合检索</title>
+<meta name="description" content="把课程讲义变成可检索的知识库：seekdb 同时承载中文全文索引与 HNSW 向量索引，双路召回后用 RRF 融合，结果带章节出处。">
+<meta property="og:title" content="课程笔记检索助手 · seekdb 混合检索">
+<meta property="og:description" content="向量召回 + 全文召回 + RRF 融合，检索结果直接定位到讲义的第几节。">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3d34'/%3E%3Cpath d='M11 9a3 3 0 0 1 3-3h7v3h-6v14h6v3h-7a3 3 0 0 1-3-3z' fill='%23f4efe4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#search">跳到检索</a>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="kicker">2026 OceanBase 数据库大赛 · Qoder 赛道</p>
+    <h1>课程笔记检索助手</h1>
+    <p class="lede">
+      期末复习时「记得老师讲过，但翻不到在哪一页」——这个工具把讲义切块、建索引，用一句自然语言直接定位到具体章节和原文片段。
+      向量通道负责「换个说法也能找到」，全文通道负责「专有名词一搜就中」，两路结果用 RRF 融合排序。
+    </p>
+    <ul class="facts">
+      <li><strong>seekdb 1.3.0.0</strong> 同表承载全文索引与向量索引</li>
+      <li><strong>8 / 8</strong> 验证样例命中预期章节</li>
+      <li><strong>无大模型生成</strong> 返回原文，不编造内容</li>
+    </ul>
+  </div>
+</header>
+
+<main>
+  <section class="wrap search-section" id="search" aria-labelledby="search-h">
+    <div class="section-head">
+      <h2 id="search-h">试一试</h2>
+      <p id="mode" class="mode" role="status" aria-live="polite">选一个问题，或直接输入</p>
+    </div>
+
+    <form id="form" class="search-bar" role="search">
+      <label class="sr-only" for="q">检索内容</label>
+      <input id="q" type="search" name="q" autocomplete="off" placeholder="例如：间隙锁为什么能解决幻读">
+      <label class="sr-only" for="course">课程</label>
+      <select id="course"><option value="">全部课程</option></select>
+      <button type="submit">检索</button>
+    </form>
+
+    <div class="chips" id="chips" aria-label="验证样例"></div>
+
+    <ol class="results" id="results"></ol>
+    <p class="note" id="note"></p>
+  </section>
+
+  <section class="wrap" aria-labelledby="how-h">
+    <h2 id="how-h">它是怎么工作的</h2>
+    <div class="diagram">
+      <svg viewBox="0 0 780 200" role="img" aria-label="流程：讲义切块后，分别进入向量召回与全文召回，结果经 RRF 融合排序并带出处返回">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/>
+          </marker>
+        </defs>
+        <rect x="4" y="70" width="140" height="58" rx="8"/>
+        <text x="74" y="94" text-anchor="middle" class="t1">讲义</text>
+        <text x="74" y="112" text-anchor="middle">md / txt / pdf / docx</text>
+
+        <line x1="150" y1="99" x2="190" y2="99" marker-end="url(#ar)"/>
+
+        <rect x="196" y="70" width="150" height="58" rx="8"/>
+        <text x="271" y="94" text-anchor="middle" class="t1">切块</text>
+        <text x="271" y="112" text-anchor="middle">章节路径 + 700 字窗口</text>
+
+        <path d="M348 92 C 372 92, 378 46, 402 46" marker-end="url(#ar)"/>
+        <path d="M348 106 C 372 106, 378 152, 402 152" marker-end="url(#ar)"/>
+
+        <g class="lane">
+          <rect x="408" y="20" width="176" height="52" rx="8"/>
+          <rect x="408" y="126" width="176" height="52" rx="8"/>
+        </g>
+        <text x="496" y="42" text-anchor="middle" class="t1">向量召回</text>
+        <text x="496" y="59" text-anchor="middle">HNSW · cosine · 40 条</text>
+        <text x="496" y="148" text-anchor="middle" class="t1">全文召回</text>
+        <text x="496" y="165" text-anchor="middle">ik 分词 · MATCH … AGAINST</text>
+
+        <path d="M586 46 C 610 46, 616 92, 640 92" marker-end="url(#ar)"/>
+        <path d="M586 152 C 610 152, 616 106, 640 106" marker-end="url(#ar)"/>
+
+        <rect x="646" y="70" width="130" height="58" rx="8"/>
+        <text x="711" y="94" text-anchor="middle" class="t1">RRF 融合</text>
+        <text x="711" y="112" text-anchor="middle">1 / (60 + 名次)</text>
+      </svg>
+    </div>
+    <ol class="steps">
+      <li>
+        <h3>按讲义结构切块</h3>
+        <p>先按 Markdown 标题切节，把章节路径（<code>第 4 讲 / 4.2 B+ 树为什么适合做磁盘索引</code>）一起存下来；再在节内按段落聚合成约 700 字的块，相邻块保留 100 字重叠，避免答案被切在边界上。</p>
+      </li>
+      <li>
+        <h3>两路同时召回</h3>
+        <p>向量通道取余弦距离最近的 40 条（HNSW 近似检索），全文通道取 <code>MATCH … AGAINST</code> 得分最高的 40 条。前者认语义，后者认字面。</p>
+      </li>
+      <li>
+        <h3>按名次融合</h3>
+        <p>两条通道的分数不可比，所以只比名次：<code>1 / (60 + rank)</code> 相加后重排。同一个块被两路同时命中，得分自然更高。</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="wrap" aria-labelledby="seekdb-h">
+    <h2 id="seekdb-h">seekdb 承担了哪一部分</h2>
+    <p class="prose">检索层没有引入额外的向量库：表格里的全文索引、向量索引、相似度排序、标量过滤全部由 seekdb 完成，应用只负责切块、取 embedding 和融合排序。</p>
+    <div class="table-wrap">
+      <table>
+        <caption class="sr-only">seekdb 能力与对应 SQL</caption>
+        <thead><tr><th scope="col">能力</th><th scope="col">实现</th></tr></thead>
+        <tbody>
+          <tr><td>中文全文索引</td><td><code>FULLTEXT KEY ft_content(content) WITH PARSER ik</code></td></tr>
+          <tr><td>向量索引</td><td><code>VECTOR INDEX vidx_vec(content_vec) WITH (distance=cosine, type=hnsw)</code></td></tr>
+          <tr><td>语义召回</td><td><code>ORDER BY cosine_distance(content_vec, %s) APPROXIMATE LIMIT 40</code></td></tr>
+          <tr><td>字面召回</td><td><code>WHERE MATCH(content) AGAINST(%s)</code>，返回值即相关度</td></tr>
+          <tr><td>按课程过滤</td><td><code>WHERE course = %s</code> 与向量排序写在同一条 SQL 里</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="eval-h">
+    <h2 id="eval-h">验证样例</h2>
+    <p class="prose">8 条查询覆盖两门课、四个主题，每条都标了期望命中的源文件与章节号。下表是本地连 seekdb 跑出来的真实结果：8 条全部在前 3 位命中，其中「间隙锁为什么能解决幻读」排在第 2 位。</p>
+    <div class="table-wrap">
+      <table class="eval">
+        <caption class="sr-only">验证样例与命中情况</caption>
+        <thead><tr><th scope="col">查询</th><th scope="col">期望章节</th><th scope="col">实际名次</th><th scope="col">通道</th></tr></thead>
+        <tbody id="eval-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="run-h">
+    <h2 id="run-h">本地复现</h2>
+    <pre class="code"><code># 1. 装依赖
+pip install -r requirements.txt
+
+# 2. 配置 .env（embedding 服务 + seekdb 连接），建表在导入时自动完成
+cp .env.example .env
+
+# 3. 导入讲义
+python -m src.ingest samples/database --course 数据库系统
+python -m src.ingest samples/os --course 操作系统
+
+# 4. 检索（命令行 / 网页）
+python -m src.search "B+ 树为什么适合做索引"
+python -m uvicorn src.web:app --port 8010
+
+# 5. 跑验证样例
+python -m eval.run_eval</code></pre>
+    <p class="prose">完整说明、实现细节和开发过程见仓库里的 <code>README.md</code> 与 <code>QODER_DEVLOG.md</code>。</p>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <p>源码：<a href="https://github.com/wei12651/powercontext-q/tree/2026-competition-ecosystem/qoder" rel="noopener">wei12651/powercontext-q · qoder/</a></p>
+    <p class="small">页面上方检索框为在线演示：内置语料是本仓库 <code>samples/</code> 的 15 个片段。选中验证样例时展示的是本地 seekdb 真实混合检索的结果（含两路命中标记）；自由输入时由浏览器现场做全文匹配，向量通道需连接本地 seekdb 才能参与。</p>
+  </div>
+</footer>
+
+<script src="demo-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
