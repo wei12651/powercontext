@@ -3,7 +3,7 @@
 - Qoder 账号 UID：`01a182d2-d663-7f33-9533-385287e80975`
 - 参赛者：wei12651
 - 开发时间：2026-10-29
-- 代码仓库：https://github.com/wei12651/powercontext-q （分支 `2026-competition-ecosystem`，代码位于 `qoder/` 目录）
+- 代码仓库：https://github.com/wei12651/powercontext （分支 `2026-competition-ecosystem`，代码位于 `qoder/` 目录）
 - 公开站点：https://course-notes-search-4stmu9183vl.qoder.zone/
 
 ## 1. 需求确认
