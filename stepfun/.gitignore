@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.metrics/
+*.log
+
+public/ort/
+public/models/

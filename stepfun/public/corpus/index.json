@@ -1,0 +1,10 @@
+[
+  { "path": "database/索引与查询优化.md", "course": "数据库" },
+  { "path": "database/事务与隔离级别.md", "course": "数据库" },
+  { "path": "database/日志与崩溃恢复.md", "course": "数据库" },
+  { "path": "database/分布式事务与复制.md", "course": "数据库" },
+  { "path": "os/虚拟内存与页面置换.md", "course": "操作系统" },
+  { "path": "os/进程调度与并发.md", "course": "操作系统" },
+  { "path": "net/TCP与拥塞控制.md", "course": "计算机网络" },
+  { "path": "net/HTTP缓存与CDN.md", "course": "计算机网络" }
+]

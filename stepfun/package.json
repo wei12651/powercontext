@@ -1,0 +1,27 @@
+{
+  "name": "stepfun-kb",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "浏览器本地向量化 + seekdb 库内混合检索的迷你知识库",
+  "scripts": {
+    "prepare:ort": "node scripts/prepare-ort.mjs",
+    "predev": "node scripts/prepare-ort.mjs && node scripts/fetch-model.mjs",
+    "dev": "concurrently -k -n web,api -c cyan,magenta \"vite\" \"node server/index.mjs\"",
+    "prebuild": "node scripts/prepare-ort.mjs && node scripts/fetch-model.mjs",
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "fetch:model": "node scripts/fetch-model.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
+    "express": "^5.3.0",
+    "mysql2": "^3.11.5",
+    "seekdb": "1.4.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2",
+    "vite": "^8.3.5"
+  }
+}
