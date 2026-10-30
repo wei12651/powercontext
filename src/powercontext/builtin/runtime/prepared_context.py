@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
@@ -106,6 +108,7 @@ class PreparedContextBuild:
     origins: tuple[PreparedContextOrigin, ...]
     omissions: PreparedContextOmissions = PreparedContextOmissions()
     code_origins: tuple[CodeEvidenceRef, ...] = ()
+    fragments: tuple[PreparedContextFragment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,16 @@ class MemoryEntryAddress:
     memory: ArtifactAddress
     entry_id: str
     entry_version_id: str
+
+
+@dataclass(frozen=True)
+class PreparedContextFragment:
+    """One literal slice of a Memory entry selected for the current query."""
+
+    address: MemoryEntryAddress
+    start: int
+    end: int
+    text: str
 
 
 PreparedContextOrigin = MemoryCitation | ArtifactRef | MemoryEntryAddress | ArtifactAddress
@@ -235,6 +248,9 @@ class PreparedContextBuilder:
         if sum(len(candidates.hits) for candidates in experience_candidates) > self.experience_candidate_limit:
             raise PreparedContextInvariantError("experience-candidate-limit")
 
+        if request.evidence_selection:
+            return self._build_evidence_selection(request, memory_candidates)
+
         content, origins, omissions = self._select_entries(
             request=request,
             current_scope_id=current_scope_id,
@@ -346,6 +362,76 @@ class PreparedContextBuilder:
         if not entries:
             return None, (), omissions
         return _render(entries), tuple(entry.origin for entry in entries), omissions
+
+    def _build_evidence_selection(  # noqa: C901 - one selection policy per candidate pool
+        self,
+        request: PrepareContextRequest,
+        memory_candidates: Sequence[PreparedMemoryCandidates],
+    ) -> PreparedContextBuild:
+        """Select literal Memory slices that match the current query within the byte budget."""
+
+        entries: list[tuple[MemoryEntryAddress, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for candidates in memory_candidates:
+            for hit in candidates.hits:
+                if hit.memory_ref is None or not hit.text.strip():
+                    continue
+                identity = (candidates.scope_id, hit.entry_id, hit.entry_version_id)
+                if identity in seen:
+                    continue
+                if hit.entry_id.strip() and hit.entry_version_id.strip():
+                    seen.add(identity)
+                entries.append(
+                    (
+                        MemoryEntryAddress(
+                            memory=ArtifactAddress(scope_id=candidates.scope_id, artifact=hit.memory_ref),
+                            entry_id=hit.entry_id,
+                            entry_version_id=hit.entry_version_id,
+                        ),
+                        hit.text,
+                    )
+                )
+        if not entries:
+            return PreparedContextBuild(context=self.empty(), origins=())
+        query_terms = _query_terms(request.query)
+        fragments: tuple[PreparedContextFragment, ...] = ()
+        if query_terms:
+            document_frequency: dict[str, int] = {}
+            for _, text in entries:
+                for term in _term_counts(text).keys() & query_terms.keys():
+                    document_frequency[term] = document_frequency.get(term, 0) + 1
+            idf = {
+                term: math.log(1.0 + (len(entries) + 1.0) / (document_frequency.get(term, 0) + 1.0)) + 1.0
+                for term in query_terms
+            }
+            ranked: list[tuple[float, int, int, int]] = []
+            for index, (_, text) in enumerate(entries):
+                for start, end in _sentence_spans(text):
+                    counts = _term_counts(text[start:end])
+                    matched = counts.keys() & query_terms.keys()
+                    if not matched:
+                        continue
+                    score = sum(idf[term] * min(counts[term], 2) for term in matched)
+                    ranked.append((-score, index, start, end))
+            ranked.sort()
+            chosen: list[tuple[int, int, int]] = []
+            for _, index, start, end in ranked:
+                candidate = _merge_spans((*chosen, (index, start, end)))
+                candidate_fragments = _selection_fragments(entries, candidate)
+                if len(_render_selection(candidate_fragments).encode("utf-8")) <= request.max_bytes:
+                    chosen = candidate
+            fragments = _selection_fragments(entries, chosen)
+        if not fragments:
+            return PreparedContextBuild(context=self.empty(), origins=())
+        content = _render_selection(fragments)
+        content_bytes = len(content.encode("utf-8"))
+        if content_bytes > request.max_bytes:
+            return PreparedContextBuild(context=self.empty(), origins=())
+        return PreparedContextBuild(
+            context=PreparedContext(status="ready", content=content, content_bytes=content_bytes),
+            origins=tuple(fragment.address for fragment in fragments),
+            fragments=fragments,
+        )
 
     def _select_text(
         self,
@@ -658,6 +744,83 @@ class PreparedContextBuilder:
         if best is None:
             return _EntryFit(dropped_no_fitting_truncation=True)
         return _EntryFit(entry=best)
+
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _query_terms(query: str) -> dict[str, float]:
+    terms: dict[str, float] = {}
+    for token in _WORD.findall(query.casefold()):
+        terms[token] = 1.0
+    return terms
+
+
+def _term_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for token in _WORD.findall(text.casefold()):
+        counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"[^.!?\n]+[.!?]*", text):
+        start, end = match.span()
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start < end:
+            spans.append((start, end))
+    return spans
+
+
+def _merge_spans(spans: Sequence[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+    ordered = sorted(spans)
+    merged: list[tuple[int, int, int]] = []
+    for entry, start, end in ordered:
+        if merged and merged[-1][0] == entry and start <= merged[-1][2] + 1:
+            previous = merged[-1]
+            merged[-1] = (entry, previous[1], max(previous[2], end))
+        else:
+            merged.append((entry, start, end))
+    return merged
+
+
+def _selection_fragments(
+    entries: Sequence[tuple[MemoryEntryAddress, str]],
+    spans: Sequence[tuple[int, int, int]],
+) -> tuple[PreparedContextFragment, ...]:
+    fragments = []
+    for entry, start, end in spans:
+        address, text = entries[entry]
+        fragments.append(
+            PreparedContextFragment(address=address, start=start, end=end, text=text[start:end])
+        )
+    return tuple(fragments)
+
+
+def _render_selection(fragments: Sequence[PreparedContextFragment]) -> str:
+    envelope = {
+        "trust": "untrusted_history",
+        "items": [
+            {
+                "citation": {
+                    "scope_id": fragment.address.memory.scope_id,
+                    "memory_ref": fragment.address.memory.artifact.model_dump(mode="json"),
+                    "entry_id": fragment.address.entry_id,
+                    "entry_version_id": fragment.address.entry_version_id,
+                },
+                "content": fragment.text,
+                "start": fragment.start,
+                "end": fragment.end,
+            }
+            for fragment in fragments
+        ],
+    }
+    encoded = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+    return "\n\n".join((TRUST_POLICY, f"{_BEGIN_MARKER}\n{encoded}\n{_END_MARKER}"))
 
 
 def _interleave(

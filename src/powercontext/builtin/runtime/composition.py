@@ -85,6 +85,7 @@ from powercontext.builtin.persistence.memory_index import CompositeMemoryIndex, 
 from powercontext.builtin.persistence.oceanbase.experience_index import OceanBaseExperienceFTSIndex
 from powercontext.builtin.persistence.oceanbase.memory_index import (
     OceanBaseMemoryFTSIndex,
+    OceanBaseMemoryHybridIndex,
     OceanBaseMemoryVectorIndex,
 )
 from powercontext.builtin.persistence.oceanbase.profile import OceanBaseConfig, OceanBaseProfile
@@ -156,6 +157,7 @@ from powercontext.builtin.runtime.readiness import (
 )
 from powercontext.builtin.runtime.recall_sufficiency import RecallSufficiencyPolicy
 from powercontext.builtin.runtime.relational import RelationalContexts
+from powercontext.builtin.runtime.source_lifecycle import LIFECYCLE_TABLES, SourceLifecycleStore
 from powercontext.builtin.runtime.topic_memory_processing import (
     TopicMemoryWorkerSpec,
     run_topic_memory_worker,
@@ -651,6 +653,7 @@ async def open_builtin_runtime(
                 scheduled_source_runner=scheduled_source_runner,
                 scheduled_experience_runner=scheduled_experience_runner,
                 remote_ingestion=contexts,
+                lifecycle_store=SourceLifecycleStore(contexts.database),
             )
         )
         runtime.artifact_processing_supervisor = await resources.enter_async_context(
@@ -718,6 +721,10 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
         "experience": config.runtime.experience_schedule_seconds,
         "profile": config.runtime.profile_schedule_enabled or None,
         "skill": None,
+    }
+    count_thresholds = {
+        "memory": config.runtime.memory_source_count_threshold,
+        "topic-memory": config.runtime.topic_memory_source_count_threshold,
     }
     for family, schedule in automatic.items():
         if schedule is not None and family not in declared | registered:
@@ -787,6 +794,7 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
                 if family == "skill"
                 else SourceProcessingPendingProvider(contexts.database, binding, family),
                 automatic_scope_filter=enabled_profile_scopes if family == "profile" else None,
+                source_count_threshold=count_thresholds.get(family),
             )
         )
     _validate_processing_registrations(configured)
@@ -892,7 +900,7 @@ async def open_builtin_contexts(
         topic_index = CompositeTopicMemoryIndex(*topic_indexes)
         async with SQLiteProfile.open(
             database,
-            tables=BUILTIN_TABLES + index.tables + topic_index.tables,
+            tables=BUILTIN_TABLES + index.tables + topic_index.tables + LIFECYCLE_TABLES,
             load_vector_extension=embedding_model is not None,
         ) as profile:
             async with profile.database.transaction() as connection:
@@ -960,15 +968,19 @@ async def open_builtin_contexts(
                 await contexts.aclose_usage_recorder()
         return
     experience_index = OceanBaseExperienceFTSIndex()
-    indexes = [OceanBaseMemoryFTSIndex()]
+    fts_index = OceanBaseMemoryFTSIndex()
+    indexes = [fts_index]
+    hybrid_index = None
     if embedding_model is not None:
-        indexes.append(OceanBaseMemoryVectorIndex(embedding_model.profile))
-    index = CompositeMemoryIndex(*indexes)
+        vector_index = OceanBaseMemoryVectorIndex(embedding_model.profile)
+        indexes.append(vector_index)
+        hybrid_index = OceanBaseMemoryHybridIndex(vector_index)
+    index = CompositeMemoryIndex(*indexes, hybrid_index=hybrid_index)
     topic_indexes: list[TopicMemoryIndex] = [OceanBaseTopicMemoryFTSIndex()]
     if embedding_model is not None:
         topic_indexes.append(OceanBaseTopicMemoryVectorIndex(embedding_model.profile))
     topic_index = CompositeTopicMemoryIndex(*topic_indexes)
-    tables = BUILTIN_TABLES + index.tables + topic_index.tables
+    tables = BUILTIN_TABLES + index.tables + topic_index.tables + LIFECYCLE_TABLES
     if isinstance(database, OceanBaseConfig):
         profile_context = OceanBaseProfile.open(database, tables=tables)
     elif isinstance(database, SeekDBConfig):

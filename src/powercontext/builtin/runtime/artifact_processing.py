@@ -47,6 +47,7 @@ else:
     from multiprocessing.popen_spawn_posix import Popen as SpawnPopen
 
 from powercontext._logging import log_safely
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.errors import ArtifactProcessingLeadershipLostError
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
@@ -57,7 +58,11 @@ from powercontext.builtin.persistence.supervision import (
     ArtifactProcessingLeaseRepository,
     database_utc_now,
 )
-from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE, ARTIFACT_PROCESSING_LEASES_TABLE
+from powercontext.builtin.persistence.tables import (
+    ARTIFACT_PROCESSING_INTENTS_TABLE,
+    ARTIFACT_PROCESSING_LEASES_TABLE,
+    SOURCE_JOURNAL_HEADS_TABLE,
+)
 from powercontext.builtin.runtime.processing_contracts import (
     ArtifactProcessingWorkAssignment,
     ArtifactProcessingWorkerCompletion,
@@ -114,11 +119,14 @@ class ArtifactProcessingBinding:
     timezone: str = "Asia/Shanghai"
     config_prefix: str | None = None
     pending_provider: ArtifactProcessingPendingProvider | None = None
+    # Additional deterministic admission condition: the number of persisted
+    # Source-journal identities after this Family's last committed cursor.
+    source_count_threshold: int | None = None
     # Only automatic admission is filtered; already accepted requests retain
     # their own Worker authorization and domain completion semantics.
     automatic_scope_filter: Callable[[AsyncConnection, tuple[str, ...]], Awaitable[frozenset[str]]] | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901 - one validation per binding field
         if not self.binding_name or self.binding_name != self.binding_name.strip():
             raise ValueError("binding_name must be nonempty and trimmed")  # noqa: TRY003
         if re.fullmatch(r"[a-z][a-z0-9-]*", self.artifact_family) is None:
@@ -138,6 +146,10 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+        if self.source_count_threshold is not None and (
+            type(self.source_count_threshold) is not int or self.source_count_threshold < 1
+        ):
+            raise ValueError("source_count_threshold must be a positive integer")  # noqa: TRY003
 
 
 class _WorkerResultSender(Protocol):
@@ -395,6 +407,8 @@ class _FamilyState:
     scan_after: int = 0
     scan_generation: int = 0
     scan_in_progress: bool = False
+    count_after: int = 0
+    count_scanning: bool = False
     reconcile_after: str | None = None
     reconcile_complete: bool = False
     notification_at_start: int = 0
@@ -781,6 +795,76 @@ class ArtifactProcessingSupervisor:
         state.next_discovery_at = next_discovery_at
         for scope in admitted:
             self._enqueue(state, scope)
+        if binding.source_count_threshold is not None:
+            await self._discover_count(state)
+
+    async def _discover_count(self, state: _FamilyState) -> None:
+        """Admit every dirty Scope whose unprocessed journal identities reach the threshold.
+
+        The count is durable domain progress (journal head minus this Family's
+        committed cursor), so no scan snapshot is retained. Time-based admission
+        remains independent and ORs with this condition.
+        """
+
+        binding = state.binding
+        threshold = binding.source_count_threshold
+        if threshold is None:
+            return
+        capacity = min(self._fresh_capacity(state), _DISCOVERY_PAGE_SIZE)
+        if capacity <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        after = state.count_after
+        full_page = False
+        admitted: list[str] = []
+        async with self._database.transaction() as connection:
+            await self._leases.require_fence(connection, self._require_current_fence())
+            rows = await self._intents.scan(
+                connection,
+                binding.binding_name,
+                after_sequence=after,
+                limit=capacity,
+                dirty_only=True,
+            )
+            candidates = [
+                row
+                for row in rows
+                if row.scope_id not in state.queued
+                and row.scope_id not in state.running
+                and row.scope_id not in state.retries
+                and row.requested_generation <= row.handled_generation
+            ]
+            if candidates:
+                scope_ids = tuple(row.scope_id for row in candidates)
+                heads = dict(
+                    (
+                        await connection.execute(
+                            select(SOURCE_JOURNAL_HEADS_TABLE.c.scope_id, SOURCE_JOURNAL_HEADS_TABLE.c.position)
+                            .where(SOURCE_JOURNAL_HEADS_TABLE.c.scope_id.in_(scope_ids))
+                        )
+                    ).all()
+                )
+                cursors = await SourceCursorRepository().load_many(
+                    connection, scope_ids, binding.binding_name
+                )
+                for row in candidates:
+                    cursor = cursors.get(row.scope_id)
+                    pending = int(heads.get(row.scope_id) or 0) - (
+                        0 if cursor is None else cursor.cursor.sequence
+                    )
+                    if pending < threshold:
+                        continue
+                    await self._intents.request(connection, row.scope_id, binding.binding_name)
+                    admitted.append(row.scope_id)
+            if rows:
+                after = rows[-1].pending_sequence
+            full_page = len(rows) == capacity
+        state.count_after = 0 if not full_page else after
+        state.count_scanning = full_page
+        if full_page:
+            state.next_discovery_at = loop.time() + _DISCOVERY_PAGE_DELAY_SECONDS
+        for scope in admitted:
+            self._enqueue(state, scope)
 
     @staticmethod
     def _fresh_capacity(state: _FamilyState) -> int:
@@ -1059,6 +1143,8 @@ class ArtifactProcessingSupervisor:
             state.retries.clear()
             state.requested_after = state.scan_after = state.scan_generation = 0
             state.scan_in_progress = False
+            state.count_after = 0
+            state.count_scanning = False
             state.discovery_pending = True
 
     async def _reap_unconfirmed_exits(self) -> None:
@@ -1093,7 +1179,13 @@ class ArtifactProcessingSupervisor:
                 continue
             if state.next_schedule_at is not None:
                 deadlines.append(state.next_schedule_at)
-            if state.discovery_pending or state.scan_in_progress or not state.reconcile_complete or state.degraded:
+            if (
+                state.discovery_pending
+                or state.scan_in_progress
+                or state.count_scanning
+                or not state.reconcile_complete
+                or state.degraded
+            ):
                 deadlines.append(max(now, state.next_discovery_at))
         return None if not deadlines else max(0.001, min(deadlines) - now)
 

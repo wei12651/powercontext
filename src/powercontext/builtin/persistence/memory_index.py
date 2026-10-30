@@ -189,8 +189,9 @@ class NoMemoryIndex:
 class CompositeMemoryIndex:
     """Combine independent search indexes without leaking them into repositories."""
 
-    def __init__(self, *indexes: MemoryIndex) -> None:
+    def __init__(self, *indexes: MemoryIndex, hybrid_index: Any | None = None) -> None:
         self.indexes = indexes
+        self._hybrid_index = hybrid_index
         fts = any(index.capabilities.fts for index in indexes)
         vector_indexes = tuple(index for index in indexes if index.capabilities.vector)
         profile = vector_indexes[0].capabilities.embedding_profile if vector_indexes else None
@@ -247,6 +248,8 @@ class CompositeMemoryIndex:
         request: MemorySearchRequest,
         /,
     ) -> MemorySearchChannels:
+        if request.mode == "hybrid" and self._hybrid_index is not None:
+            return await self._hybrid_index.search_hybrid(connection, scope_id, request)
         fts: tuple[MemoryChannelHit, ...] = ()
         vector: tuple[MemoryChannelHit, ...] = ()
         for index in self.indexes:
